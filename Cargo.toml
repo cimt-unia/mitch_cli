@@ -1,0 +1,15 @@
+[package]
+name = "mitch_cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+btleplug = "0.11"
+futures = "0.3"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0" 
+lsl = { git = "https://github.com/kojofl/liblsl-rust", version = "0.1.3" }
+uuid = "1.17.0"
