@@ -90,7 +90,6 @@ impl DeviceActor {
                                 )
                                 .await.unwrap();
                             self.peripheral.read(cmd_char).await.unwrap();
-                            println!("test");
                         }
                         Some(DeviceCommand::Shutdown) => {
                             println!("Actor {}: Received Shutdown command.", addr);
