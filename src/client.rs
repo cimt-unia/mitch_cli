@@ -39,6 +39,9 @@ pub async fn run_client(command: ClientCommand) -> Result<()> {
                 println!("{device}");
             }
         }
+        DaemonResponse::Status(device_status) => {
+            println!("{:?}", device_status)
+        }
     }
 
     Ok(())

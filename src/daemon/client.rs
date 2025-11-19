@@ -1,7 +1,7 @@
 use super::DeviceMap;
 use crate::{
     daemon::{DeviceCommand, device_actor::DeviceActor},
-    protocol::{ClientCommand, DaemonResponse},
+    protocol::{ClientCommand, DaemonResponse, DeviceStatus},
 };
 use ::futures::future::join_all;
 use anyhow::Result;
@@ -93,12 +93,16 @@ impl Client {
                 let map = self.device_map.lock().await;
                 let mut status_fut = Vec::with_capacity(map.len());
                 for (_, c) in map.iter() {
-                    let (tx, rx) = oneshot::channel::<u8>();
+                    let (tx, rx) = oneshot::channel::<DeviceStatus>();
                     c.send(DeviceCommand::Status { tx }).await?;
                     status_fut.push(rx);
                 }
-                println!("{:?}", join_all(status_fut.into_iter()).await);
-                DaemonResponse::Ok
+                let res = join_all(status_fut.into_iter())
+                    .await
+                    .into_iter()
+                    .filter_map(|s| s.ok())
+                    .collect();
+                DaemonResponse::Status(res)
             }
         };
 

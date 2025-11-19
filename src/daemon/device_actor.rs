@@ -1,5 +1,5 @@
 use super::{DeviceCommand, DeviceMap};
-use crate::mitch::Commands;
+use crate::{mitch::Commands, protocol::DeviceStatus};
 use anyhow::{Result, anyhow};
 use bluez_async::{
     BluetoothSession, CharacteristicEvent, DeviceEvent, DeviceInfo, WriteOptions, WriteType,
@@ -119,8 +119,12 @@ impl DeviceActor {
                                 )
                                 .await?;
                             let res = self.session.read_characteristic_value(&cmd_char.id).await?;
-                            println!("{res:?}");
-                            tx.send(res[4]).ok();
+                            let charge = if res[3] == 0 {
+                                Some(res[4])
+                            } else {
+                                None
+                            };
+                            tx.send(DeviceStatus{ name: self.name.clone(), battery_charge: charge }).ok();
                         }
                         None => {
                             info!("Actor {}: Command channel closed. Shutting down.", self.name);

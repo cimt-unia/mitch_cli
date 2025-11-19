@@ -1,4 +1,4 @@
-use crate::protocol::IPC_SOCKET_PATH;
+use crate::protocol::{DeviceStatus, IPC_SOCKET_PATH};
 use anyhow::Result;
 use bluez_async::{AdapterInfo, BluetoothSession};
 use client::Client;
@@ -15,12 +15,8 @@ mod device_actor;
 type DeviceMap = Arc<Mutex<HashMap<String, mpsc::Sender<DeviceCommand>>>>;
 
 enum DeviceCommand {
-    StartRecording {
-        lsl_stream_name: String,
-    },
-    Status {
-        tx: Sender<u8>,
-    },
+    StartRecording { lsl_stream_name: String },
+    Status { tx: Sender<DeviceStatus> },
     Shutdown,
 }
 

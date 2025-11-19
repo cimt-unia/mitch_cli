@@ -16,5 +16,12 @@ pub enum ClientCommand {
 pub enum DaemonResponse {
     Ok,
     Devices(Vec<String>),
+    Status(Vec<DeviceStatus>),
     Error(String),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DeviceStatus {
+    pub name: String,
+    pub battery_charge: Option<u8>,
 }
