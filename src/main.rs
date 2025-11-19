@@ -9,7 +9,7 @@ pub mod mitch;
 mod protocol;
 
 #[derive(Debug, Parser)]
-#[clap(name = "my-ble-tool", version = "0.1.0")]
+#[clap(name = "mitch_cli", version = "0.1.0")]
 struct Cli {
     #[clap(subcommand)]
     command: Command,
@@ -18,7 +18,6 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     DaemonStart,
-
     Scan {
         #[clap(short, long, default_value_t = 2000)]
         timeout: u64,
@@ -29,11 +28,9 @@ enum Command {
     Connect {
         name: String,
     },
-
     Disconnect {
         name: String,
     },
-
     Record {
         name: String,
     },
