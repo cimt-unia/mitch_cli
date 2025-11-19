@@ -3,23 +3,27 @@ use crate::{
     daemon::{DeviceCommand, device_actor::DeviceActor},
     protocol::{ClientCommand, DaemonResponse},
 };
+use ::futures::future::join_all;
 use anyhow::Result;
-use btleplug::{
-    api::{Central, Peripheral, ScanFilter},
-    platform::Adapter,
-};
+use bluez_async::{AdapterInfo, BluetoothSession};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::{sync::mpsc, time};
+use tokio::{
+    sync::oneshot::{self},
+    time,
+};
+use tracing::info;
 
 pub struct Client {
-    adapter: Adapter,
+    session: BluetoothSession,
+    adapter: AdapterInfo,
     device_map: DeviceMap,
 }
 
 impl Client {
-    pub fn new(adapter: Adapter, device_map: DeviceMap) -> Self {
+    pub fn new(session: BluetoothSession, adapter: AdapterInfo, device_map: DeviceMap) -> Self {
         Self {
+            session,
             adapter,
             device_map,
         }
@@ -35,27 +39,31 @@ impl Client {
         let mut command_json = vec![0; len];
         stream.read_exact(&mut command_json).await?;
         let command: ClientCommand = serde_json::from_slice(&command_json)?;
+        info!("Received new command: {command:?}");
 
         let response = match command {
             ClientCommand::Scan { timeout_ms } => {
-                self.adapter.start_scan(ScanFilter::default()).await?;
+                self.session
+                    .start_discovery_on_adapter(&self.adapter.id)
+                    .await?;
                 time::sleep(Duration::from_millis(timeout_ms)).await;
-                self.adapter.stop_scan().await?;
+                self.session.stop_discovery().await?;
                 let mut devices = Vec::new();
-                for per in self.adapter.peripherals().await? {
-                    let properties = per.properties().await.unwrap();
-                    let n = properties.and_then(|p| p.local_name).unwrap_or_default();
+                for per in self
+                    .session
+                    .get_devices_on_adapter(&self.adapter.id)
+                    .await?
+                {
+                    let n = per.name.unwrap_or_default();
                     if n.starts_with("mitch") {
                         devices.push(n);
                     }
                 }
                 DaemonResponse::Devices(devices)
             }
-
             ClientCommand::Connect { name } => self.connect(name.as_str()).await?,
-
             ClientCommand::Disconnect { name } => {
-                println!("Daemon: Disconnecting from {}...", name);
+                info!("Disconnecting from {}...", name);
                 let mut map = self.device_map.lock().await;
 
                 // Find the actor's channel and send Shutdown
@@ -67,9 +75,8 @@ impl Client {
                     DaemonResponse::Error("Device not connected".to_string())
                 }
             }
-
             ClientCommand::Record { name } => {
-                println!("Daemon: Telling {} to record...", name);
+                info!("Telling {} to record...", name);
                 let map = self.device_map.lock().await;
 
                 if let Some(tx) = map.get(&name) {
@@ -82,6 +89,17 @@ impl Client {
                     DaemonResponse::Error("Device not connected".to_string())
                 }
             }
+            ClientCommand::Status => {
+                let map = self.device_map.lock().await;
+                let mut status_fut = Vec::with_capacity(map.len());
+                for (_, c) in map.iter() {
+                    let (tx, rx) = oneshot::channel::<u8>();
+                    c.send(DeviceCommand::Status { tx }).await?;
+                    status_fut.push(rx);
+                }
+                println!("{:?}", join_all(status_fut.into_iter()).await);
+                DaemonResponse::Ok
+            }
         };
 
         let response_json = serde_json::to_vec(&response)?;
@@ -92,33 +110,39 @@ impl Client {
     }
 
     async fn connect(&self, name: &str) -> Result<DaemonResponse> {
-        println!("Daemon: Connecting to {}...", name);
+        info!("Connecting to {}...", name);
         // 1. Find the peripheral (this is a simplified search)
-        self.adapter.start_scan(ScanFilter::default()).await?;
+        self.session
+            .start_discovery_on_adapter(&self.adapter.id)
+            .await?;
         time::sleep(Duration::from_secs(5)).await;
-        self.adapter.stop_scan().await?;
-        let mut peripheral = None;
-        for per in self.adapter.peripherals().await? {
-            let properties = per.properties().await.unwrap();
-            let n = properties.and_then(|p| p.local_name).unwrap_or_default();
-            if n == name {
-                peripheral = Some(per);
+        self.session.stop_discovery().await?;
+        let mut device = None;
+        for per in self
+            .session
+            .get_devices_on_adapter(&self.adapter.id)
+            .await?
+        {
+            if let Some(ref n) = per.name
+                && n == name
+            {
+                device = Some(per);
             }
         }
 
-        let Some(peripheral) = peripheral else {
+        let Some(device) = device else {
             return Ok(DaemonResponse::Error(format!("{name} not found")));
         };
 
         // 2. Connect
-        peripheral.connect().await?;
-        println!("Daemon: Connected.");
+        self.session.connect(&device.id).await?;
+        info!("Daemon: Connected.");
 
         // 3. Create the actor's command channel
-        let (tx, rx) = mpsc::channel(32); // 32 is a typical buffer size
+        let (tx, rx) = tokio::sync::mpsc::channel(32); // 32 is a typical buffer size
         let map_clone = self.device_map.clone();
 
-        DeviceActor::new(name, peripheral, rx, map_clone).spawn();
+        DeviceActor::new(name, device, self.session.clone(), rx, map_clone).spawn();
 
         // 5. Store the sender in the map
         let mut map = self.device_map.lock().await;

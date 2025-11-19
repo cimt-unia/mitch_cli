@@ -1,18 +1,25 @@
 use super::{DeviceCommand, DeviceMap};
 use crate::mitch::Commands;
-use btleplug::api::{Peripheral as _, WriteType};
-use btleplug::platform::Peripheral;
+use anyhow::{Result, anyhow};
+use bluez_async::{
+    BluetoothSession, CharacteristicEvent, DeviceEvent, DeviceInfo, WriteOptions, WriteType,
+};
+use core::panic;
 use futures::StreamExt as _;
 use lsl::{Pushable as _, StreamInfo, StreamOutlet};
 use tokio::sync::mpsc::Receiver;
+use tracing::{info, warn};
 use uuid::{Uuid, uuid};
 
 pub const COMMAND_CHAR: Uuid = uuid!("d5913036-2d8a-41ee-85b9-4e361aa5c8a7");
 pub const DATA_CHAR: Uuid = uuid!("09bf2c52-d1d9-c0b7-4145-475964544307");
 
+pub const SERVICE: Uuid = uuid!("c8c0a708-e361-4b5e-a365-98fa6b0a836f");
+
 pub struct DeviceActor {
     name: String,
-    peripheral: Peripheral,
+    device: DeviceInfo,
+    session: BluetoothSession,
     rx: Receiver<DeviceCommand>,
     device_map: DeviceMap,
 }
@@ -21,13 +28,15 @@ impl DeviceActor {
     #[must_use = "Creating a DeviceActor without spawning it does nothing"]
     pub fn new(
         name: &str,
-        peripheral: btleplug::platform::Peripheral,
+        device: DeviceInfo,
+        session: BluetoothSession,
         rx: Receiver<DeviceCommand>,
         device_map: DeviceMap,
     ) -> Self {
         Self {
             name: name.to_string(),
-            peripheral,
+            device,
+            session,
             rx,
             device_map,
         }
@@ -37,66 +46,84 @@ impl DeviceActor {
         tokio::task::spawn_local(self.task());
     }
 
-    async fn task(mut self) {
-        let addr = self.peripheral.address();
-        println!("Actor for {}: Spawned.", addr);
+    async fn task(mut self) -> Result<()> {
+        info!("Actor for {}: Spawned.", self.name);
 
-        let mut notifications_stream = match self.peripheral.notifications().await {
+        let mut notifications_stream = match self.session.device_event_stream(&self.device.id).await
+        {
             Ok(stream) => stream.fuse(),
             Err(e) => {
-                eprintln!("Actor for {}: Failed to get notifications: {}", addr, e);
-                return;
+                return Err(anyhow!(
+                    "Actor for {}: Failed to get notifications: {}",
+                    self.name,
+                    e
+                ));
             }
         };
 
-        // We'll use a placeholder for the LSL outlet
-        let mut lsl_outlet: Option<StreamOutlet> = None; // Replace () with lsl_rs::Outlet<...>
+        let mut lsl_outlet: Option<StreamOutlet> = None;
+        let service = self
+            .session
+            .get_service_by_uuid(&self.device.id, SERVICE)
+            .await?;
+        let cmd_char = self
+            .session
+            .get_characteristic_by_uuid(&service.id, COMMAND_CHAR)
+            .await?;
+        let data_char = self
+            .session
+            .get_characteristic_by_uuid(&service.id, DATA_CHAR)
+            .await?;
+        let data_id = data_char.id.clone();
 
-        // --- Main actor loop ---
         loop {
             tokio::select! {
-                // --- BRANCH 1: Listen for commands ---
                 maybe_command = self.rx.recv() => {
                     match maybe_command {
                         Some(DeviceCommand::StartRecording { lsl_stream_name }) => {
-                            println!("Actor {}: Received StartRecording ({})", addr, lsl_stream_name);
+                            info!("Actor {}: Received StartRecording ({})", self.name, lsl_stream_name);
 
                             let info =
                                 StreamInfo::new(self.name.as_str(), "Pressure", 16, 50.0, lsl::ChannelFormat::Int16, self.name.as_str())
-                                    .unwrap();
+                                .unwrap();
                             let outlet = StreamOutlet::new(&info, 1, 360).unwrap();
-                            // 1. Create LSL outlet
-                            // lsl_outlet = Some(lsl_rs::Outlet::new(...));
-                            lsl_outlet = Some(outlet); // Placeholder
-                            println!("Actor {}: LSL Outlet created.", addr);
+                            lsl_outlet = Some(outlet);
+                            info!("Actor {}: LSL Outlet created.", self.name);
 
-                            // 2. Subscribe to notifications & tell device to start TX
-                            // (You'll need to find your specific characteristic UUID)
-                            // peripheral.subscribe(characteristic).await;
-                            // peripheral.write(..., b"START_TX_COMMAND", ...).await;
-                            let mut c = self.peripheral.characteristics();
-                            if c.is_empty() {
-                                self.peripheral.discover_services().await.unwrap();
-                                c = self.peripheral.characteristics();
-                            }
-                            let data_char = c.iter().find(|c| c.uuid == DATA_CHAR).unwrap();
-                            self.peripheral.subscribe(data_char).await.unwrap();
-                            let cmd_char = c.iter().find(|c| c.uuid == COMMAND_CHAR).unwrap();
-                            self.peripheral
-                                .write(
-                                    cmd_char,
+                            self.session
+                                .write_characteristic_value_with_options(
+                                    &cmd_char.id,
                                     Commands::StartPressureStream.as_ref(),
-                                    WriteType::WithResponse,
+                                    WriteOptions {
+                                        write_type: Some(WriteType::WithResponse),
+                                        ..Default::default()
+                                    },
                                 )
-                                .await.unwrap();
-                            self.peripheral.read(cmd_char).await.unwrap();
+                                .await?;
+                            self.session.read_characteristic_value(&cmd_char.id).await?;
+                            self.session.start_notify(&data_char.id).await?;
                         }
                         Some(DeviceCommand::Shutdown) => {
-                            println!("Actor {}: Received Shutdown command.", addr);
+                            info!("Actor {}: Received Shutdown command.", self.name);
                             break; // Break the loop to enter cleanup
                         }
+                        Some(DeviceCommand::Status { tx }) => {
+                            self.session
+                                .write_characteristic_value_with_options(
+                                    &cmd_char.id,
+                                    Commands::GetPower.as_ref(),
+                                    WriteOptions {
+                                        write_type: Some(WriteType::WithResponse),
+                                        ..Default::default()
+                                    },
+                                )
+                                .await?;
+                            let res = self.session.read_characteristic_value(&cmd_char.id).await?;
+                            println!("{res:?}");
+                            tx.send(res[4]).ok();
+                        }
                         None => {
-                            println!("Actor {}: Command channel closed. Shutting down.", addr);
+                            info!("Actor {}: Command channel closed. Shutting down.", self.name);
                             break; // Break the loop
                         }
                     }
@@ -104,32 +131,58 @@ impl DeviceActor {
 
                 maybe_data = notifications_stream.next() => {
                     match maybe_data {
-                        Some(data) => {
-                            if data.uuid != DATA_CHAR {
-                                continue;
+                        Some(bluez_async::BluetoothEvent::Characteristic { id, event }) => {
+                            if data_id == id  &&
+                                let Some(outlet) = lsl_outlet.as_ref() {
+                                    let CharacteristicEvent::Value { value: data } = event else {
+                                        panic!()
+                                    };
+                                    outlet
+                                        .push_sample(
+                                            &data[4..].iter().map(|b| *b as i16).collect::<Vec<i16>>(),
+                                        )
+                                        .unwrap();
                             }
-                            if let Some(outlet) = lsl_outlet.as_ref() {
-                                outlet
-                                    .push_sample(
-                                        &data.value[4..].iter().map(|b| *b as i16).collect::<Vec<i16>>(),
-                                    )
-                                    .unwrap();                            }
+                        }
+                        Some(bluez_async::BluetoothEvent::Device { id: _, event: DeviceEvent::Connected { connected } }) => {
+                            if !connected {
+                                info!("Actor {}: lost connection attempting reconnect", self.name);
+                                if self.session.connect(&self.device.id).await.is_err() {
+                                    warn!("Failed to reconnect to {} cleaning up", self.name);
+                                }
+                                if lsl_outlet.is_some() {
+                                    self.session
+                                        .write_characteristic_value_with_options(
+                                            &cmd_char.id,
+                                            Commands::StartPressureStream.as_ref(),
+                                            WriteOptions {
+                                                write_type: Some(WriteType::WithResponse),
+                                                ..Default::default()
+                                            },
+                                        )
+                                        .await?;
+                                    self.session.read_characteristic_value(&cmd_char.id).await?;
+                                    self.session.start_notify(&data_char.id).await?;
+                                }
+                                info!("Actor {}: sucessfully reconnected", self.name);
+                            }
                         }
                         None => {
-                            eprintln!("Actor {}: BLE connection dropped! Shutting down.", addr);
+                            warn!("Actor {}: something strange happened cleaning up", self.name);
                             break; // Break the loop
                         }
+                        _ => {}
                     }
                 },
             }
         }
 
-        // --- UNIFIED CLEANUP ---
-        println!("Actor for {}: Cleaning up resources...", addr);
-        self.peripheral.disconnect().await.ok();
+        info!("Actor for {}: Cleaning up resources...", self.name);
+        self.session.disconnect(&self.device.id).await.ok();
 
         let mut map = self.device_map.lock().await;
         map.remove(&self.name);
-        println!("Actor for {}: Shutdown complete.", addr);
+        info!("Actor for {}: Shutdown complete.", self.name);
+        Ok(())
     }
 }

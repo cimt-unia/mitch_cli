@@ -4,8 +4,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[cfg(unix)]
 use tokio::net::UnixStream;
-#[cfg(windows)]
-use tokio::net::windows::named_pipe::ClientOptions;
 
 pub async fn run_client(command: ClientCommand) -> Result<()> {
     #[cfg(unix)]
@@ -14,16 +12,6 @@ pub async fn run_client(command: ClientCommand) -> Result<()> {
         Err(e) => {
             eprintln!("Error: Could not connect to daemon. Is it running?");
             eprintln!("Try running: `mitch_cli daemon-start`");
-            return Err(e.into());
-        }
-    };
-
-    #[cfg(windows)]
-    let mut stream = match ClientOptions::new().open(IPC_SOCKET_PATH) {
-        Ok(stream) => stream,
-        Err(e) => {
-            eprintln!("Error: Could not connect to daemon. Is it running?");
-            eprintln!("Try running: `mitch__cli daemon-start`");
             return Err(e.into());
         }
     };
