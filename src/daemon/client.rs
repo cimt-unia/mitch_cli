@@ -167,7 +167,9 @@ impl Client {
             .await
             .ok_or(anyhow!("Unable to retrieve btle handle from mac_address"))?;
 
-        let mut hci_handle = tokio::process::Command::new("hcitool")
+        let mut hci_handle = tokio::process::Command::new("sudo")
+            .arg("-n")
+            .arg("hcitool")
             .arg("lecup")
             .arg(handle) // Handle
             .arg("40") // min
@@ -187,7 +189,9 @@ impl Client {
     }
 
     async fn get_handle_from_mac(mac: MacAddress) -> Option<String> {
-        let hci_handle = tokio::process::Command::new("hcitool")
+        let hci_handle = tokio::process::Command::new("sudo")
+            .arg("-n")
+            .arg("hcitool")
             .arg("con")
             .stdout(Stdio::piped())
             .spawn()
