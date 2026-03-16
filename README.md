@@ -31,7 +31,7 @@ mitch_cli daemon-start
 if you want to run the daemon in the background and create a log file use this:
 
 ```
-mitch_cli daemon-start > daemon.lob &
+mitch_cli daemon-start > daemon.log &
 ```
 
 To scan for mitches:
