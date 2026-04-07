@@ -9,6 +9,7 @@ use futures::StreamExt as _;
 use lsl::{Pushable as _, StreamInfo, StreamOutlet};
 use std::time::Duration;
 use tokio::sync::mpsc::Receiver;
+use tokio::time::{Instant, MissedTickBehavior, interval};
 use tracing::{info, warn};
 use uuid::{Uuid, uuid};
 
@@ -62,7 +63,11 @@ impl DeviceActor {
             }
         };
 
+        let mut connected = true;
         let mut lsl_outlet: Option<StreamOutlet> = None;
+        let mut last_notification_time = Instant::now();
+        let mut watchdog = interval(Duration::from_secs(3));
+        watchdog.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let service = self
             .session
             .get_service_by_uuid(&self.device.id, SERVICE)
@@ -103,6 +108,7 @@ impl DeviceActor {
                                 .await?;
                             self.session.read_characteristic_value(&cmd_char.id).await?;
                             self.session.start_notify(&data_char.id).await?;
+                            last_notification_time = Instant::now();
                         }
                         Some(DeviceCommand::Shutdown) => {
                             info!("Actor {}: Received Shutdown command.", self.name);
@@ -147,10 +153,11 @@ impl DeviceActor {
                                             &data[4..].iter().map(|b| *b as i16).collect::<Vec<i16>>(),
                                         )
                                         .unwrap();
+                                    last_notification_time = Instant::now();
                             }
                         }
-                        Some(bluez_async::BluetoothEvent::Device { id: _, event: DeviceEvent::Connected { connected } }) => {
-                            if !connected {
+                        Some(bluez_async::BluetoothEvent::Device { id: _, event: DeviceEvent::Connected { connected: is_connected } }) => {
+                            if !is_connected {
                                 info!("Actor {}: lost connection attempting reconnect", self.name);
                                 let exp_backoff = [2, 4, 8, 16, u64::MAX];
                                 let max_attempts = exp_backoff.len() - 1;
@@ -158,6 +165,7 @@ impl DeviceActor {
                                     if self.session.connect(&self.device.id).await.is_err() {
                                         if i == max_attempts {
                                             warn!("Failed to reconnect to {} cleaning up", self.name);
+                                            connected = false;
                                             break 'main;
                                         }
                                         warn!("Failed to reconnect to {}, attempting again in {}s", self.name, backoff);
@@ -194,11 +202,35 @@ impl DeviceActor {
                         _ => {}
                     }
                 },
+
+                _ = watchdog.tick() => {
+                    if lsl_outlet.is_some() && last_notification_time.elapsed() >= Duration::from_secs(3) {
+                        warn!("Actor {}: notification stream silent, re-subscribing", self.name);
+                        self.session.stop_notify(&data_char.id).await.ok();
+                        match self.session.start_notify(&data_char.id).await {
+                            Ok(()) => {}
+                            Err(e) => {
+                                warn!("Actor {}: re-subscription failed: {}", self.name, e);
+                            }
+                        }
+                        match self.session.device_event_stream(&self.device.id).await {
+                            Ok(s) => {
+                                notifications_stream = s.fuse();
+                            }
+                            Err(e) => {
+                                warn!("Actor {}: failed to recreate event stream: {}", self.name, e);
+                                break 'main;
+                            }
+                        }
+                    }
+                },
             }
         }
 
         info!("Actor for {}: Cleaning up resources...", self.name);
-        self.session.disconnect(&self.device.id).await.ok();
+        if connected {
+            self.session.disconnect(&self.device.id).await.ok();
+        }
 
         let mut map = self.device_map.lock().await;
         map.remove(&self.name);
