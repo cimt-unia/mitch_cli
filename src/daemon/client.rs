@@ -114,8 +114,13 @@ impl Client {
     }
 
     async fn connect(&self, name: &str) -> Result<DaemonResponse> {
+        if self.device_map.lock().await.contains_key(name) {
+            warn!("Allready connected to {}", name);
+            return Ok(DaemonResponse::Error(format!(
+                "Allready connected to {name}"
+            )));
+        }
         info!("Connecting to {}...", name);
-        // 1. Find the peripheral (this is a simplified search)
         self.session
             .start_discovery_on_adapter(&self.adapter.id)
             .await?;
