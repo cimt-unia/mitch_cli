@@ -2,7 +2,8 @@ use super::{DeviceCommand, DeviceMap};
 use crate::{daemon::client::Client, mitch::Commands, protocol::DeviceStatus};
 use anyhow::{Result, anyhow};
 use bluez_async::{
-    BluetoothSession, CharacteristicEvent, DeviceEvent, DeviceInfo, WriteOptions, WriteType,
+    BluetoothError, BluetoothSession, CharacteristicEvent, DeviceEvent, DeviceInfo, WriteOptions,
+    WriteType,
 };
 use core::panic;
 use futures::StreamExt as _;
@@ -50,8 +51,7 @@ impl DeviceActor {
     async fn task(mut self) -> Result<()> {
         info!("Actor for {}: Spawned.", self.name);
 
-        let mut notifications_stream = match self.session.event_stream().await
-        {
+        let mut notifications_stream = match self.session.event_stream().await {
             Ok(stream) => stream.fuse(),
             Err(e) => {
                 return Err(anyhow!(
@@ -160,14 +160,40 @@ impl DeviceActor {
                                 let exp_backoff = [2, 4, 8, 16, u64::MAX];
                                 let max_attempts = exp_backoff.len() - 1;
                                 for (i, backoff) in exp_backoff.iter().enumerate() {
+                                    self.session.disconnect(&self.device.id).await.ok();
                                     if let Err(e) = self.session.connect(&self.device.id).await {
                                         if i == max_attempts {
                                             warn!("Failed to reconnect to {} cleaning up", self.name);
                                             connected = false;
                                             break 'main;
                                         }
-                                        warn!("Failed to reconnect to {}\n{:?}\nattempting again in {}s", self.name, e, backoff);
+                                        warn!("Failed to reconnect to {}, attempting again in {}s", self.name, backoff);
                                         tokio::time::sleep(Duration::from_secs(*backoff)).await;
+                                        if let BluetoothError::DbusError(err) = e &&
+                                            err.name().map(|n| n.contains("UnknownObject")).unwrap_or(false) {
+                                            warn!("BlueZ destroyed the device object trying to rediscover");
+                                            let adapter = self.session.get_adapters().await?[0].clone();
+                                            self.session
+                                                .start_discovery_on_adapter(&adapter.id)
+                                                .await?;
+                                            tokio::time::sleep(Duration::from_secs(5)).await;
+                                            self.session.stop_discovery().await?;
+                                            let mut device = None;
+                                            for per in self
+                                                .session
+                                                    .get_devices_on_adapter(&adapter.id)
+                                                    .await?
+                                                    {
+                                                        if let Some(ref n) = per.name
+                                                            && n == &self.name
+                                                            {
+                                                                device = Some(per);
+                                                            }
+                                                    }
+                                            if let Some(device) = device {
+                                                self.device = device;
+                                            }
+                                        }
                                         continue
                                     }
                                     if lsl_outlet.is_some() {
