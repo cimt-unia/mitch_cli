@@ -2,7 +2,8 @@ use super::{DeviceCommand, DeviceMap};
 use crate::{daemon::client::Client, mitch::Commands, protocol::DeviceStatus};
 use anyhow::{Result, anyhow};
 use bluez_async::{
-    BluetoothSession, CharacteristicEvent, DeviceEvent, DeviceInfo, WriteOptions, WriteType,
+    BluetoothError, BluetoothSession, CharacteristicEvent, DeviceEvent, DeviceInfo, WriteOptions,
+    WriteType,
 };
 use core::panic;
 use futures::StreamExt as _;
@@ -50,8 +51,7 @@ impl DeviceActor {
     async fn task(mut self) -> Result<()> {
         info!("Actor for {}: Spawned.", self.name);
 
-        let mut notifications_stream = match self.session.device_event_stream(&self.device.id).await
-        {
+        let mut notifications_stream = match self.session.event_stream().await {
             Ok(stream) => stream.fuse(),
             Err(e) => {
                 return Err(anyhow!(
@@ -62,6 +62,7 @@ impl DeviceActor {
             }
         };
 
+        let mut connected = true;
         let mut lsl_outlet: Option<StreamOutlet> = None;
         let service = self
             .session
@@ -139,29 +140,60 @@ impl DeviceActor {
                         Some(bluez_async::BluetoothEvent::Characteristic { id, event }) => {
                             if data_id == id  &&
                                 let Some(outlet) = lsl_outlet.as_ref() {
-                                    let CharacteristicEvent::Value { value: data } = event else {
-                                        panic!()
-                                    };
-                                    outlet
-                                        .push_sample(
-                                            &data[4..].iter().map(|b| *b as i16).collect::<Vec<i16>>(),
-                                        )
-                                        .unwrap();
-                            }
+                                    match event {
+                                        CharacteristicEvent::Value { value: data } => {
+                                            if data.len() >= 4 {
+                                                outlet.push_sample(&data[4..].iter().map(|b| *b as i16).collect::<Vec<i16>>()).unwrap();
+                                            }
+                                        }
+                                        _ => {
+                                            warn!("Actor {}: Received non-value characteristic event.", self.name);
+                                        }
+                                    }}
                         }
-                        Some(bluez_async::BluetoothEvent::Device { id: _, event: DeviceEvent::Connected { connected } }) => {
-                            if !connected {
+                        Some(bluez_async::BluetoothEvent::Device { id, event: DeviceEvent::Connected { connected: is_connected } }) => {
+                            if id != self.device.id {
+                                continue;
+                            }
+                            if !is_connected {
                                 info!("Actor {}: lost connection attempting reconnect", self.name);
                                 let exp_backoff = [2, 4, 8, 16, u64::MAX];
                                 let max_attempts = exp_backoff.len() - 1;
                                 for (i, backoff) in exp_backoff.iter().enumerate() {
-                                    if self.session.connect(&self.device.id).await.is_err() {
+                                    self.session.disconnect(&self.device.id).await.ok();
+                                    if let Err(e) = self.session.connect(&self.device.id).await {
                                         if i == max_attempts {
                                             warn!("Failed to reconnect to {} cleaning up", self.name);
+                                            connected = false;
                                             break 'main;
                                         }
                                         warn!("Failed to reconnect to {}, attempting again in {}s", self.name, backoff);
                                         tokio::time::sleep(Duration::from_secs(*backoff)).await;
+                                        if let BluetoothError::DbusError(err) = e &&
+                                            err.name().map(|n| n.contains("UnknownObject")).unwrap_or(false) {
+                                            warn!("BlueZ destroyed the device object trying to rediscover");
+                                            let adapter = self.session.get_adapters().await?[0].clone();
+                                            self.session
+                                                .start_discovery_on_adapter(&adapter.id)
+                                                .await?;
+                                            tokio::time::sleep(Duration::from_secs(5)).await;
+                                            self.session.stop_discovery().await?;
+                                            let mut device = None;
+                                            for per in self
+                                                .session
+                                                    .get_devices_on_adapter(&adapter.id)
+                                                    .await?
+                                                    {
+                                                        if let Some(ref n) = per.name
+                                                            && n == &self.name
+                                                            {
+                                                                device = Some(per);
+                                                            }
+                                                    }
+                                            if let Some(device) = device {
+                                                self.device = device;
+                                            }
+                                        }
                                         continue
                                     }
                                     if lsl_outlet.is_some() {
@@ -175,8 +207,8 @@ impl DeviceActor {
                                                 },
                                             )
                                             .await?;
-                                        self.session.read_characteristic_value(&cmd_char.id).await?;
-                                        self.session.start_notify(&data_char.id).await?;
+                                        self.session.read_characteristic_value(&cmd_char.id).await.ok();
+                                        self.session.start_notify(&data_char.id).await.ok();
                                     }
                                     break;
                                 }
@@ -193,12 +225,15 @@ impl DeviceActor {
                         }
                         _ => {}
                     }
-                },
+                }
             }
         }
 
         info!("Actor for {}: Cleaning up resources...", self.name);
-        self.session.disconnect(&self.device.id).await.ok();
+        self.session.stop_notify(&data_char.id).await.ok();
+        if connected {
+            self.session.disconnect(&self.device.id).await.ok();
+        }
 
         let mut map = self.device_map.lock().await;
         map.remove(&self.name);
