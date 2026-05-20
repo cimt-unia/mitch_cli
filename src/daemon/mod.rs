@@ -7,7 +7,7 @@ use std::sync::Arc;
 #[cfg(unix)]
 use tokio::net::UnixListener;
 use tokio::sync::{Mutex, mpsc, oneshot::Sender};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 mod client;
 mod device_actor;
@@ -42,8 +42,26 @@ impl Daemon {
 
         #[cfg(unix)]
         {
-            let _ = tokio::fs::remove_file(IPC_SOCKET_PATH).await;
-            let listener = UnixListener::bind(IPC_SOCKET_PATH)?;
+            use anyhow::Context;
+
+            let m = self.device_map.clone();
+
+            ctrlc_async::set_async_handler(async move {
+                use std::process::exit;
+
+                let _ = std::fs::remove_file(IPC_SOCKET_PATH);
+                for (_, tx) in m.lock().await.iter() {
+                    tx.send(DeviceCommand::Shutdown).await.ok();
+                }
+                while !m.lock().await.is_empty() {
+                    use std::time::Duration;
+
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                exit(0);
+            })?;
+            let listener = UnixListener::bind(IPC_SOCKET_PATH)
+                .context("There seems to be a daemon running allready")?;
 
             loop {
                 match listener.accept().await {
@@ -67,5 +85,11 @@ impl Daemon {
                 }
             }
         }
+    }
+}
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        warn!("droppi");
+        print!("droppi");
     }
 }

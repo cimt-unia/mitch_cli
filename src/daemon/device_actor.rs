@@ -10,7 +10,7 @@ use futures::StreamExt as _;
 use lsl::{Pushable as _, StreamInfo, StreamOutlet};
 use std::time::Duration;
 use tokio::sync::mpsc::Receiver;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use uuid::{Uuid, uuid};
 
 pub const COMMAND_CHAR: Uuid = uuid!("d5913036-2d8a-41ee-85b9-4e361aa5c8a7");
@@ -169,6 +169,7 @@ impl DeviceActor {
                                         }
                                         warn!("Failed to reconnect to {}, attempting again in {}s", self.name, backoff);
                                         tokio::time::sleep(Duration::from_secs(*backoff)).await;
+                                        error!("{:#?}", e);
                                         if let BluetoothError::DbusError(err) = e &&
                                             err.name().map(|n| n.contains("UnknownObject")).unwrap_or(false) {
                                             warn!("BlueZ destroyed the device object trying to rediscover");
