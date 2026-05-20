@@ -47,7 +47,7 @@ impl AsRef<[u8]> for Commands {
             Commands::StartAccelerometryStream => &[0x02, 0x03, 0xF8, 0x04, 0x04],
             Commands::StartPressureStream => &[0x02, 0x03, 0xF8, 0x01, 0x04],
             Commands::StopStream => &[0x02, 0x01, 0x02],
-            Commands::GetPower => &[87, 0],
+            Commands::GetPower => &[0x87, 0],
         }
     }
 }

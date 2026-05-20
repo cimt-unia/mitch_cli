@@ -143,7 +143,6 @@ impl Client {
             return Ok(DaemonResponse::Error(format!("{name} not found")));
         };
 
-        // 2. Connect
         self.session.connect(&device.id).await?;
         info!("Daemon: Connected.");
 
@@ -152,13 +151,11 @@ impl Client {
             warn!("Continuing with default config");
         }
 
-        // 3. Create the actor's command channel
-        let (tx, rx) = tokio::sync::mpsc::channel(32); // 32 is a typical buffer size
+        let (tx, rx) = tokio::sync::mpsc::channel(32); 
         let map_clone = self.device_map.clone();
 
         DeviceActor::new(name, device, self.session.clone(), rx, map_clone).spawn();
 
-        // 5. Store the sender in the map
         let mut map = self.device_map.lock().await;
         map.insert(name.to_owned(), tx);
 
