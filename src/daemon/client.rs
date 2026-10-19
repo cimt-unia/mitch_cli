@@ -47,7 +47,9 @@ impl Client {
                     .start_discovery_on_adapter(&self.adapter.id)
                     .await?;
                 time::sleep(Duration::from_millis(timeout_ms)).await;
-                self.session.stop_discovery_on_adapter(&self.adapter.id).await?;
+                self.session
+                    .stop_discovery_on_adapter(&self.adapter.id)
+                    .await?;
                 let mut devices = Vec::new();
                 for per in self
                     .session
@@ -125,7 +127,9 @@ impl Client {
             .start_discovery_on_adapter(&self.adapter.id)
             .await?;
         time::sleep(Duration::from_secs(5)).await;
-        self.session.stop_discovery_on_adapter(&self.adapter.id).await?;
+        self.session
+            .stop_discovery_on_adapter(&self.adapter.id)
+            .await?;
         let mut device = None;
         for per in self
             .session
@@ -151,7 +155,7 @@ impl Client {
             warn!("Continuing with default config");
         }
 
-        let (tx, rx) = tokio::sync::mpsc::channel(32); 
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
         let map_clone = self.device_map.clone();
 
         DeviceActor::new(name, device, self.session.clone(), rx, map_clone).spawn();

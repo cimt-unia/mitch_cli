@@ -4,6 +4,7 @@ use bluez_async::{AdapterInfo, BluetoothSession};
 use client::Client;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 #[cfg(unix)]
 use tokio::net::UnixListener;
 use tokio::sync::{Mutex, mpsc, oneshot::Sender};
@@ -79,7 +80,14 @@ impl Daemon {
                                     .handle(&mut stream)
                                     .await
                             {
-                                error!("Client error: {}", e);
+                                use crate::protocol::DaemonResponse;
+
+                                let err = e.to_string();
+                                error!("Client error: {}", err);
+                                let err = DaemonResponse::Error(err);
+                                let json = serde_json::to_vec(&err).unwrap();
+                                let _ = stream.write_all(&json.len().to_le_bytes()).await;
+                                let _ = stream.write_all(&json).await;
                             }
                         });
                     }
