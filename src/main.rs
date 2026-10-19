@@ -18,7 +18,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     DaemonStart {
-        #[clap(long, default_value = None, help = "The HCI to use, if non supplied uses the first it finds (this is non deterministic), if you only have one BTLE chip feel free to leave it empty")]
+        #[clap(long, default_value = None, help = "The HCI to use, if none supplied uses the first it finds (this is non deterministic), if you only have one BTLE chip feel free to leave it empty")]
         hci: Option<u32>,
     },
     Scan {
@@ -42,7 +42,8 @@ enum Command {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::TRACE)
+        .with_max_level(Level::INFO)
+        .with_writer(std::io::stderr)
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
     let args = Cli::parse();

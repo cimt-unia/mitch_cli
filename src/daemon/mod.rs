@@ -1,22 +1,40 @@
-use crate::protocol::{DeviceStatus, IPC_SOCKET_PATH};
+use crate::protocol::{DaemonResponse, DeviceStatus, socket_path, write_msg};
 use anyhow::{Result, anyhow};
 use bluez_async::{AdapterInfo, BluetoothSession};
 use client::Client;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::io::AsyncWriteExt;
+use std::time::Duration;
 #[cfg(unix)]
-use tokio::net::UnixListener;
+use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, mpsc, oneshot::Sender};
 use tracing::{error, info, warn};
 
 mod client;
 mod device_actor;
 
-type DeviceMap = Arc<Mutex<HashMap<String, mpsc::Sender<DeviceCommand>>>>;
+type DeviceMap = Arc<Mutex<HashMap<String, DeviceEntry>>>;
+
+/// Maximum time the shutdown handler waits for actors to clean up.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+enum DeviceEntry {
+    /// A client is currently discovering/connecting this device, reserves the name.
+    Connecting,
+    Connected(mpsc::Sender<DeviceCommand>),
+}
+
+impl DeviceEntry {
+    fn sender(&self) -> Option<&mpsc::Sender<DeviceCommand>> {
+        match self {
+            DeviceEntry::Connecting => None,
+            DeviceEntry::Connected(tx) => Some(tx),
+        }
+    }
+}
 
 enum DeviceCommand {
-    StartRecording { lsl_stream_name: String },
+    StartRecording,
     Status { tx: Sender<DeviceStatus> },
     Shutdown,
 }
@@ -37,7 +55,10 @@ impl Daemon {
                 .find(|a| a.id.to_string() == format!("hci{hci}"))
                 .ok_or(anyhow!("hci{hci} not found"))?
         } else {
-            adapters[0].clone()
+            adapters
+                .into_iter()
+                .next()
+                .ok_or(anyhow!("No bluetooth adapter found"))?
         };
         info!("Daemon using {adapter:#?}");
         let device_map = DeviceMap::new(Mutex::new(HashMap::new()));
@@ -47,31 +68,39 @@ impl Daemon {
             device_map,
         })
     }
-    pub async fn run(&self) -> Result<()> {
-        info!("Daemon listening on {}", IPC_SOCKET_PATH);
 
+    pub async fn run(&self) -> Result<()> {
         #[cfg(unix)]
         {
-            use anyhow::Context;
+            let path = socket_path();
+            let listener = bind_listener(&path).await?;
+            info!("Daemon listening on {}", path.display());
 
             let m = self.device_map.clone();
-
             ctrlc_async::set_async_handler(async move {
-                use std::process::exit;
-
-                let _ = std::fs::remove_file(IPC_SOCKET_PATH);
-                for (_, tx) in m.lock().await.iter() {
+                let _ = std::fs::remove_file(socket_path());
+                let senders: Vec<_> = m
+                    .lock()
+                    .await
+                    .values()
+                    .filter_map(|e| e.sender().cloned())
+                    .collect();
+                for tx in senders {
                     tx.send(DeviceCommand::Shutdown).await.ok();
                 }
-                while !m.lock().await.is_empty() {
-                    use std::time::Duration;
-
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                let wait_empty = async {
+                    while !m.lock().await.is_empty() {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                };
+                if tokio::time::timeout(SHUTDOWN_TIMEOUT, wait_empty)
+                    .await
+                    .is_err()
+                {
+                    warn!("Not all devices shut down in time, exiting anyway");
                 }
-                exit(0);
+                std::process::exit(0);
             })?;
-            let listener = UnixListener::bind(IPC_SOCKET_PATH)
-                .context("There seems to be a daemon running allready")?;
 
             loop {
                 match listener.accept().await {
@@ -87,14 +116,9 @@ impl Daemon {
                                     .handle(&mut stream)
                                     .await
                             {
-                                use crate::protocol::DaemonResponse;
-
                                 let err = e.to_string();
                                 error!("Client error: {}", err);
-                                let err = DaemonResponse::Error(err);
-                                let json = serde_json::to_vec(&err).unwrap();
-                                let _ = stream.write_all(&json.len().to_le_bytes()).await;
-                                let _ = stream.write_all(&json).await;
+                                let _ = write_msg(&mut stream, &DaemonResponse::Error(err)).await;
                             }
                         });
                     }
@@ -104,9 +128,23 @@ impl Daemon {
         }
     }
 }
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        warn!("droppi");
-        print!("droppi");
+
+/// Binds the IPC socket, removing a stale socket file left behind by a crashed daemon.
+#[cfg(unix)]
+async fn bind_listener(path: &std::path::Path) -> Result<UnixListener> {
+    match UnixListener::bind(path) {
+        Ok(listener) => Ok(listener),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            if UnixStream::connect(path).await.is_ok() {
+                return Err(anyhow!(
+                    "There seems to be a daemon running already ({})",
+                    path.display()
+                ));
+            }
+            warn!("Removing stale socket {}", path.display());
+            std::fs::remove_file(path)?;
+            Ok(UnixListener::bind(path)?)
+        }
+        Err(e) => Err(e.into()),
     }
 }

@@ -19,19 +19,23 @@ impl TryFrom<u8> for MitchState {
     type Error = &'static str;
 
     fn try_from(value: u8) -> std::result::Result<MitchState, &'static str> {
-        if (1_u8..=5_u8).contains(&value)
-            || value == 0xf8
-            || value == 0xff
-            || value == 0xf0
-            || value == 0xf1
-            || value == 0xf2
-        {
-            return Ok(unsafe { *(&value as *const _ as *const MitchState) });
-        }
-        Err("Unknown state")
+        Ok(match value {
+            0x01 => MitchState::SysStartup,
+            0x02 => MitchState::SysIdle,
+            0x03 => MitchState::SysStandby,
+            0x04 => MitchState::SysLog,
+            0x05 => MitchState::SysReadout,
+            0xF8 => MitchState::SysTx,
+            0xFF => MitchState::SysError,
+            0xF0 => MitchState::BootStartup,
+            0xF1 => MitchState::BootIdle,
+            0xF2 => MitchState::BootDownload,
+            _ => return Err("Unknown state"),
+        })
     }
 }
 
+#[allow(dead_code)]
 pub enum Commands {
     GetState,
     GetPower,
