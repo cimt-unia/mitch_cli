@@ -23,6 +23,7 @@ pub async fn run_client(command: ClientCommand) -> Result<()> {
 
     match response {
         DaemonResponse::Ok => println!("Success."),
+        DaemonResponse::Shutdown => println!("Daemon shutting down."),
         DaemonResponse::Error(err) => return Err(anyhow!("Daemon error: {err}")),
         DaemonResponse::Devices(items) => {
             for device in items {

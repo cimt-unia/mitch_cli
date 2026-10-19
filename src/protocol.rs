@@ -20,7 +20,9 @@ pub enum ClientCommand {
     Status,
     Connect { name: String },
     Disconnect { name: String },
-    Record { name: String },
+    Stream { name: String },
+    StopStream { name: String },
+    Shutdown,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -29,6 +31,7 @@ pub enum DaemonResponse {
     Devices(Vec<String>),
     Status(Vec<DeviceStatus>),
     Error(String),
+    Shutdown,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

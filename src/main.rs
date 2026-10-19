@@ -1,3 +1,4 @@
+use crate::protocol::ClientCommand;
 use clap::{Parser, Subcommand};
 use daemon::Daemon;
 use tokio::task::LocalSet;
@@ -34,9 +35,13 @@ enum Command {
     Disconnect {
         name: String,
     },
-    Record {
+    Stream {
         name: String,
     },
+    StopStream {
+        name: String,
+    },
+    Shutdown,
 }
 
 #[tokio::main]
@@ -55,21 +60,23 @@ async fn main() -> anyhow::Result<()> {
             localset.run_until(Daemon::new(hci).await?.run()).await?;
         }
         Command::Scan { timeout } => {
-            client::run_client(protocol::ClientCommand::Scan {
+            client::run_client(ClientCommand::Scan {
                 timeout_ms: timeout,
             })
             .await?;
         }
         Command::Connect { name } => {
-            client::run_client(protocol::ClientCommand::Connect { name }).await?;
+            client::run_client(ClientCommand::Connect { name }).await?;
         }
         Command::Disconnect { name } => {
-            client::run_client(protocol::ClientCommand::Disconnect { name }).await?;
+            client::run_client(ClientCommand::Disconnect { name }).await?;
         }
-        Command::Record { name } => {
-            client::run_client(protocol::ClientCommand::Record { name }).await?
+        Command::Stream { name } => client::run_client(ClientCommand::Stream { name }).await?,
+        Command::Status => client::run_client(ClientCommand::Status).await?,
+        Command::StopStream { name } => {
+            client::run_client(ClientCommand::StopStream { name }).await?
         }
-        Command::Status => client::run_client(protocol::ClientCommand::Status).await?,
+        Command::Shutdown => client::run_client(ClientCommand::Shutdown).await?,
     }
 
     Ok(())

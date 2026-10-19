@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{Mutex, mpsc, oneshot::Sender};
+use tokio::sync::{Mutex, Notify, mpsc, oneshot::Sender};
 use tracing::{error, info, warn};
 
 mod client;
@@ -34,7 +34,8 @@ impl DeviceEntry {
 }
 
 enum DeviceCommand {
-    StartRecording,
+    StartStreaming,
+    StopStreaming,
     Status { tx: Sender<DeviceStatus> },
     Shutdown,
 }
@@ -69,6 +70,33 @@ impl Daemon {
         })
     }
 
+    /// Tells all actors to shut down and waits (bounded) for them to clean up.
+    async fn shutdown(&self) {
+        info!("Shutting down daemon...");
+        let _ = std::fs::remove_file(socket_path());
+        let m = &self.device_map;
+        let senders: Vec<_> = m
+            .lock()
+            .await
+            .values()
+            .filter_map(|e| e.sender().cloned())
+            .collect();
+        for tx in senders {
+            tx.send(DeviceCommand::Shutdown).await.ok();
+        }
+        let wait_empty = async {
+            while !m.lock().await.is_empty() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        };
+        if tokio::time::timeout(SHUTDOWN_TIMEOUT, wait_empty)
+            .await
+            .is_err()
+        {
+            warn!("Not all devices shut down in time, exiting anyway");
+        }
+    }
+
     pub async fn run(&self) -> Result<()> {
         #[cfg(unix)]
         {
@@ -76,55 +104,47 @@ impl Daemon {
             let listener = bind_listener(&path).await?;
             info!("Daemon listening on {}", path.display());
 
-            let m = self.device_map.clone();
-            ctrlc_async::set_async_handler(async move {
-                let _ = std::fs::remove_file(socket_path());
-                let senders: Vec<_> = m
-                    .lock()
-                    .await
-                    .values()
-                    .filter_map(|e| e.sender().cloned())
-                    .collect();
-                for tx in senders {
-                    tx.send(DeviceCommand::Shutdown).await.ok();
-                }
-                let wait_empty = async {
-                    while !m.lock().await.is_empty() {
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                    }
-                };
-                if tokio::time::timeout(SHUTDOWN_TIMEOUT, wait_empty)
-                    .await
-                    .is_err()
-                {
-                    warn!("Not all devices shut down in time, exiting anyway");
-                }
-                std::process::exit(0);
-            })?;
+            // Both Ctrl-C and the `shutdown` client command only signal the accept loop,
+            // the actual shutdown runs here so it cannot race with new clients.
+            let shutdown = Arc::new(Notify::new());
+            let ctrlc_shutdown = shutdown.clone();
+            ctrlc_async::set_async_handler(async move { ctrlc_shutdown.notify_one() })?;
 
             loop {
-                match listener.accept().await {
-                    Ok((mut stream, _addr)) => {
-                        let session_clone = self.session.clone();
-                        let device_map_clone = self.device_map.clone();
-                        let adapter_clone = self.adapter.clone();
+                let (mut stream, _addr) = tokio::select! {
+                    _ = shutdown.notified() => break,
+                    res = listener.accept() => match res {
+                        Ok(conn) => conn,
+                        Err(e) => {
+                            error!("Failed to accept client: {}", e);
+                            continue;
+                        }
+                    },
+                };
+                let session_clone = self.session.clone();
+                let device_map_clone = self.device_map.clone();
+                let adapter_clone = self.adapter.clone();
+                let shutdown = shutdown.clone();
 
-                        // Spawn a task to handle this client
-                        tokio::task::spawn_local(async move {
-                            if let Err(e) =
-                                Client::new(session_clone, adapter_clone, device_map_clone)
-                                    .handle(&mut stream)
-                                    .await
-                            {
-                                let err = e.to_string();
-                                error!("Client error: {}", err);
-                                let _ = write_msg(&mut stream, &DaemonResponse::Error(err)).await;
-                            }
-                        });
+                // Spawn a task to handle this client
+                tokio::task::spawn_local(async move {
+                    match Client::new(session_clone, adapter_clone, device_map_clone)
+                        .handle(&mut stream)
+                        .await
+                    {
+                        Err(e) => {
+                            let err = e.to_string();
+                            error!("Client error: {}", err);
+                            let _ = write_msg(&mut stream, &DaemonResponse::Error(err)).await;
+                        }
+                        Ok(DaemonResponse::Shutdown) => shutdown.notify_one(),
+                        Ok(_) => {}
                     }
-                    Err(e) => error!("Failed to accept client: {}", e),
-                }
+                });
             }
+
+            self.shutdown().await;
+            Ok(())
         }
     }
 }

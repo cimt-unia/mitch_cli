@@ -79,22 +79,13 @@ impl Client {
                     None => DaemonResponse::Error("Device not connected".to_string()),
                 }
             }
-            ClientCommand::Record { name } => {
-                info!("Telling {} to record...", name);
-                let tx = self
-                    .device_map
-                    .lock()
-                    .await
-                    .get(&name)
-                    .and_then(|e| e.sender().cloned());
-
-                match tx {
-                    Some(tx) => match tx.send(DeviceCommand::StartRecording).await {
-                        Ok(()) => DaemonResponse::Ok,
-                        Err(_) => DaemonResponse::Error(format!("{name} is shutting down")),
-                    },
-                    None => DaemonResponse::Error("Device not connected".to_string()),
-                }
+            ClientCommand::Stream { name } => {
+                info!("Telling {} to start streaming...", name);
+                self.send_to(&name, DeviceCommand::StartStreaming).await
+            }
+            ClientCommand::StopStream { name } => {
+                info!("Telling {} to stop streaming...", name);
+                self.send_to(&name, DeviceCommand::StopStreaming).await
             }
             ClientCommand::Status => {
                 // Collect the senders first so the lock is not held while waiting on actors,
@@ -114,10 +105,29 @@ impl Client {
                 let res = join_all(status_fut).await.into_iter().flatten().collect();
                 DaemonResponse::Status(res)
             }
+            ClientCommand::Shutdown => DaemonResponse::Shutdown,
         };
 
         write_msg(&mut stream, &response).await?;
         Ok(response)
+    }
+
+    /// Forwards a command to the actor of a connected device.
+    async fn send_to(&self, name: &str, command: DeviceCommand) -> DaemonResponse {
+        let tx = self
+            .device_map
+            .lock()
+            .await
+            .get(name)
+            .and_then(|e| e.sender().cloned());
+
+        match tx {
+            Some(tx) => match tx.send(command).await {
+                Ok(()) => DaemonResponse::Ok,
+                Err(_) => DaemonResponse::Error(format!("{name} is shutting down")),
+            },
+            None => DaemonResponse::Error("Device not connected".to_string()),
+        }
     }
 
     async fn connect(&self, name: &str) -> Result<DaemonResponse> {
