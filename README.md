@@ -61,7 +61,19 @@ mitch_cli disconnect <Name>
 To set a mitch to streaming mode opening a lsl-stream:
 
 ```
-mitch_cli record <Name>
+mitch_cli stream <Name>
+```
+
+To stop streaming and close the lsl-stream:
+
+```
+mitch_cli stop-stream <Name>
+```
+
+To shut down the daemon, disconnecting all mitches:
+
+```
+mitch_cli shutdown
 ```
 
 

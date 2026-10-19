@@ -131,11 +131,16 @@ impl DeviceActor {
             tokio::select! {
                 maybe_command = self.rx.recv() => {
                     match maybe_command {
-                        Some(DeviceCommand::StartRecording) => {
-                            info!("Actor {}: Received StartRecording", self.name);
+                        Some(DeviceCommand::StartStreaming) => {
+                            info!("Actor {}: Received StartStreaming", self.name);
                             self.lsl_outlet = Some(self.create_outlet()?);
                             info!("Actor {}: LSL Outlet created.", self.name);
                             self.start_stream(&cmd_char, &data_char).await?;
+                        }
+                        Some(DeviceCommand::StopStreaming) => {
+                            info!("Actor {}: Received StopStreaming", self.name);
+                            self.stop_stream(&cmd_char, &data_char).await?;
+                            self.lsl_outlet = None;
                         }
                         Some(DeviceCommand::Shutdown) => {
                             info!("Actor {}: Received Shutdown command.", self.name);
@@ -258,12 +263,16 @@ impl DeviceActor {
                     Some(DeviceCommand::Status { tx }) => {
                         tx.send(DeviceStatus { name: self.name.clone(), battery_charge: None }).ok();
                     }
-                    Some(DeviceCommand::StartRecording) => {
+                    Some(DeviceCommand::StartStreaming) => {
                         // Stream gets started once reconnected.
                         match self.create_outlet() {
                             Ok(outlet) => self.lsl_outlet = Some(outlet),
                             Err(e) => warn!("Actor {}: {:#}", self.name, e),
                         }
+                    }
+                    Some(DeviceCommand::StopStreaming) => {
+                        // Dropping the outlet prevents the stream from restarting on reconnect.
+                        self.lsl_outlet = None;
                     }
                 },
             }
@@ -312,6 +321,17 @@ impl DeviceActor {
             .await?;
         self.session.read_characteristic_value(cmd_char).await?;
         self.session.start_notify(data_char).await?;
+        Ok(())
+    }
+
+    async fn stop_stream(
+        &self,
+        cmd_char: &CharacteristicId,
+        data_char: &CharacteristicId,
+    ) -> Result<()> {
+        self.session.stop_notify(data_char).await?;
+        self.write_command(cmd_char, Commands::StopStream).await?;
+        self.session.read_characteristic_value(cmd_char).await?;
         Ok(())
     }
 
