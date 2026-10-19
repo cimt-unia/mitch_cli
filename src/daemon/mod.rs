@@ -29,7 +29,9 @@ pub struct Daemon {
 impl Daemon {
     pub async fn new() -> Result<Self> {
         let session = BluetoothSession::new().await?.1;
-        let adapter = session.get_adapters().await?[0].clone();
+        let adapters = session.get_adapters().await?;
+        println!("{:#?}", adapters);
+        let adapter = adapters[0].clone();
         let device_map = DeviceMap::new(Mutex::new(HashMap::new()));
         Ok(Self {
             session,

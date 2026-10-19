@@ -47,7 +47,7 @@ impl Client {
                     .start_discovery_on_adapter(&self.adapter.id)
                     .await?;
                 time::sleep(Duration::from_millis(timeout_ms)).await;
-                self.session.stop_discovery().await?;
+                self.session.stop_discovery_on_adapter(&self.adapter.id).await?;
                 let mut devices = Vec::new();
                 for per in self
                     .session
@@ -125,7 +125,7 @@ impl Client {
             .start_discovery_on_adapter(&self.adapter.id)
             .await?;
         time::sleep(Duration::from_secs(5)).await;
-        self.session.stop_discovery().await?;
+        self.session.stop_discovery_on_adapter(&self.adapter.id).await?;
         let mut device = None;
         for per in self
             .session
