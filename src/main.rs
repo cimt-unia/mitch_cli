@@ -17,7 +17,10 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    DaemonStart,
+    DaemonStart {
+        #[clap(long, default_value = None, help = "The HCI to use, if non supplied uses the first it finds (this is non deterministic), if you only have one BTLE chip feel free to leave it empty")]
+        hci: Option<u32>,
+    },
     Scan {
         #[clap(short, long, default_value_t = 2000)]
         timeout: u64,
@@ -45,10 +48,10 @@ async fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
 
     match args.command {
-        Command::DaemonStart => {
+        Command::DaemonStart { hci } => {
             info!("Starting daemon...");
             let localset = LocalSet::new();
-            localset.run_until(Daemon::new().await?.run()).await?;
+            localset.run_until(Daemon::new(hci).await?.run()).await?;
         }
         Command::Scan { timeout } => {
             client::run_client(protocol::ClientCommand::Scan {
