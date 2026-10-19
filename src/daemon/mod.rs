@@ -1,5 +1,5 @@
 use crate::protocol::{DeviceStatus, IPC_SOCKET_PATH};
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use bluez_async::{AdapterInfo, BluetoothSession};
 use client::Client;
 use std::collections::HashMap;
@@ -28,11 +28,18 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    pub async fn new() -> Result<Self> {
+    pub async fn new(hci: Option<u32>) -> Result<Self> {
         let session = BluetoothSession::new().await?.1;
         let adapters = session.get_adapters().await?;
-        println!("{:#?}", adapters);
-        let adapter = adapters[0].clone();
+        let adapter = if let Some(hci) = hci {
+            adapters
+                .into_iter()
+                .find(|a| a.id.to_string() == format!("hci{hci}"))
+                .ok_or(anyhow!("hci{hci} not found"))?
+        } else {
+            adapters[0].clone()
+        };
+        info!("Daemon using {adapter:#?}");
         let device_map = DeviceMap::new(Mutex::new(HashMap::new()));
         Ok(Self {
             session,
